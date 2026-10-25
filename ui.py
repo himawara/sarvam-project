@@ -1,6 +1,8 @@
 import base64
+import hashlib
 import os
 import re
+import tempfile
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -23,7 +25,7 @@ st.markdown("""
   border: 1px solid rgba(255,255,255,0.08);}
 </style>
 <div class="title">🗣️ Bhasha Bot</div>
-<div class="sub">Write in any Indian language. I'll reply in yours, and speak it too.</div>
+<div class="sub">Speak or type in any Indian language. I'll answer in yours, out loud.</div>
 <div class="chips"><span>हिन्दी</span><span>தமிழ்</span><span>বাংলা</span><span>తెలుగు</span>
 <span>मराठी</span><span>ગુજરાતી</span><span>ಕನ್ನಡ</span><span>മലയാളം</span><span>English</span></div>
 """, unsafe_allow_html=True)
@@ -63,12 +65,29 @@ def speak(text):
     return base64.b64decode("".join(resp.audios))
 
 
+def transcribe(audio_bytes):
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        f.write(audio_bytes)
+        path = f.name
+    try:
+        with open(path, "rb") as fh:
+            resp = get_client().speech_to_text.transcribe(
+                file=fh, model="saaras:v3", mode="transcribe"
+            )
+        return (resp.transcript or "").strip()
+    finally:
+        os.remove(path)
+
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "audio" not in st.session_state:
     st.session_state.audio = {}
 
 with st.sidebar:
+    st.header("🎤 Speak")
+    voice = st.audio_input("Record (up to 30 sec)")
+    st.divider()
     st.header("Try these ✨")
     for label, text in [
         ("🪔 Hindi", "नमस्ते! भारत के बारे में एक मज़ेदार बात बताओ।"),
@@ -83,14 +102,16 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.audio = {}
         st.rerun()
-    st.caption("Powered by Sarvam AI · chat: sarvam-105b-conversations · voice: bulbul:v3")
+    st.caption("Powered by Sarvam AI · chat: sarvam-105b-conversations · voice: bulbul:v3 · ears: saaras:v3")
+
+autoplay_idx = st.session_state.pop("autoplay_idx", None)
 
 for i, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"], avatar="🧑" if m["role"] == "user" else "🤖"):
         st.markdown(m["content"])
         if m["role"] == "assistant":
             if i in st.session_state.audio:
-                st.audio(st.session_state.audio[i], format="audio/wav")
+                st.audio(st.session_state.audio[i], format="audio/wav", autoplay=(i == autoplay_idx))
             elif st.button("🔊 Listen", key=f"tts_{i}"):
                 with st.spinner("Generating voice..."):
                     try:
@@ -100,8 +121,26 @@ for i, m in enumerate(st.session_state.messages):
                         st.error(f"Voice failed: {type(e).__name__}: {e}")
 
 prompt = st.chat_input("Type in any Indian language...")
+from_voice = False
+
 if "queued" in st.session_state:
     prompt = st.session_state.pop("queued")
+
+if voice is not None:
+    data = voice.getvalue()
+    digest = hashlib.md5(data).hexdigest()
+    if st.session_state.get("last_voice") != digest:
+        st.session_state.last_voice = digest
+        with st.spinner("Listening..."):
+            try:
+                heard = transcribe(data)
+            except Exception as e:
+                heard = ""
+                st.error(f"Speech recognition failed: {type(e).__name__}: {e}")
+        if heard:
+            prompt, from_voice = heard, True
+        else:
+            st.warning("I couldn't hear anything. Please try recording again.")
 
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -117,4 +156,11 @@ if prompt:
             except Exception as e:
                 reply = f"⚠️ Something went wrong: {type(e).__name__}"
     st.session_state.messages.append({"role": "assistant", "content": reply})
+    if from_voice and not reply.startswith("⚠️"):
+        try:
+            idx = len(st.session_state.messages) - 1
+            st.session_state.audio[idx] = speak(reply)
+            st.session_state.autoplay_idx = idx
+        except Exception as e:
+            st.error(f"Voice failed: {type(e).__name__}: {e}")
     st.rerun()
