@@ -1,2 +1,3 @@
 sarvamai
 python-dotenv
+streamlit
