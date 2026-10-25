@@ -25,12 +25,33 @@ st.markdown("""
   border: 1px solid rgba(255,255,255,0.08);}
 </style>
 <div class="title">🗣️ Bhasha Bot</div>
-<div class="sub">Speak or type in any Indian language. I'll answer in yours, out loud.</div>
+<div class="sub">Speak or type in any Indian language. Hear the answer in the language you choose.</div>
 <div class="chips"><span>हिन्दी</span><span>தமிழ்</span><span>বাংলা</span><span>తెలుగు</span>
 <span>मराठी</span><span>ગુજરાતી</span><span>ಕನ್ನಡ</span><span>മലയാളം</span><span>English</span></div>
 """, unsafe_allow_html=True)
 
-SYSTEM = {"role": "system", "content": "You are a friendly assistant. Always reply in the same language and script the user writes in (Hindi, Tamil, Bengali, English, etc.). Keep answers clear, warm and fairly short."}
+PERSONAS = {
+    "😊 Friendly Assistant": "You are a friendly, helpful assistant.",
+    "👩‍🏫 Teacher": "You are a patient teacher. Explain step by step in simple words and give one easy example.",
+    "📖 Storyteller": "You are a storyteller. Tell short, vivid stories with Indian cultural flavour.",
+    "🧳 Travel Guide": "You are a knowledgeable India travel guide. Give practical, specific tips.",
+    "💪 Health Info": "You give general wellness information only. Always end with a short note that this is not medical advice and they should consult a doctor.",
+}
+
+REPLY_LANGS = {
+    "Auto (same as I write)": None,
+    "English": "en-IN",
+    "हिन्दी Hindi": "hi-IN",
+    "தமிழ் Tamil": "ta-IN",
+    "বাংলা Bengali": "bn-IN",
+    "తెలుగు Telugu": "te-IN",
+    "मराठी Marathi": "mr-IN",
+    "ગુજરાતી Gujarati": "gu-IN",
+    "ಕನ್ನಡ Kannada": "kn-IN",
+    "മലയാളം Malayalam": "ml-IN",
+    "ਪੰਜਾਬੀ Punjabi": "pa-IN",
+    "ଓଡ଼ିଆ Odia": "od-IN",
+}
 
 # Unicode script ranges -> Sarvam language codes
 SCRIPTS = [
@@ -50,17 +71,27 @@ def detect_lang(text):
     return max(counts, key=counts.get) if counts else "en-IN"
 
 
+def friendly(e):
+    code = getattr(e, "status_code", None)
+    if code == 429:
+        return "Rate limit reached. Wait a few seconds and try again."
+    if code in (401, 403):
+        return "API key problem. Check SARVAM_API_KEY in your .env or Secrets."
+    return f"{type(e).__name__}: {e}"
+
+
 @st.cache_resource
 def get_client():
     return SarvamAI(api_subscription_key=os.environ["SARVAM_API_KEY"])
 
 
-def speak(text):
+def speak(text, lang=None, pace=1.0):
     clean = re.sub(r"[*#_`>]", "", text)[:2500]
     resp = get_client().text_to_speech.convert(
         text=clean,
-        language_code=detect_lang(clean),
+        language_code=lang or detect_lang(clean),
         model="bulbul:v3",
+        pace=pace,
     )
     return base64.b64decode("".join(resp.audios))
 
@@ -79,6 +110,31 @@ def transcribe(audio_bytes):
         os.remove(path)
 
 
+def build_system(persona, target):
+    if target:
+        lang_rule = "Reply in clear, simple English."
+    else:
+        lang_rule = "Always reply in the same language and script the user writes in."
+    return f"{PERSONAS[persona]} {lang_rule} Keep answers warm, clear and under 150 words."
+
+
+def get_reply(persona, target):
+    msgs = [{"role": "system", "content": build_system(persona, target)}] + [
+        {"role": m["role"], "content": m["content"]} for m in st.session_state.messages
+    ]
+    reply = get_client().chat.completions(
+        model="sarvam-105b-conversations", messages=msgs
+    ).choices[0].message.content
+    if target and target != "en-IN":
+        reply = get_client().text.translate(
+            input=reply[:2000],
+            source_language_code="en-IN",
+            target_language_code=target,
+            model="sarvam-translate:v1",
+        ).translated_text
+    return reply
+
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "audio" not in st.session_state:
@@ -87,6 +143,12 @@ if "audio" not in st.session_state:
 with st.sidebar:
     st.header("🎤 Speak")
     voice = st.audio_input("Record (up to 30 sec)")
+    st.divider()
+    st.header("⚙️ Settings")
+    persona = st.selectbox("Persona", list(PERSONAS.keys()))
+    reply_label = st.selectbox("Reply language", list(REPLY_LANGS.keys()))
+    target = REPLY_LANGS[reply_label]
+    pace = st.slider("Voice speed", 0.5, 2.0, 1.0, 0.1)
     st.divider()
     st.header("Try these ✨")
     for label, text in [
@@ -98,27 +160,34 @@ with st.sidebar:
         if st.button(label, use_container_width=True):
             st.session_state.queued = text
     st.divider()
+    if st.session_state.messages:
+        transcript = "\n\n".join(
+            f"{'You' if m['role'] == 'user' else 'Bhasha Bot'}: {m['content']}"
+            for m in st.session_state.messages
+        )
+        st.download_button("⬇️ Download chat", transcript, file_name="bhasha_chat.txt",
+                           use_container_width=True)
     if st.button("🗑️ Clear chat", use_container_width=True):
         st.session_state.messages = []
         st.session_state.audio = {}
         st.rerun()
-    st.caption("Powered by Sarvam AI · chat: sarvam-105b-conversations · voice: bulbul:v3 · ears: saaras:v3")
+    st.caption("Sarvam AI · chat: sarvam-105b-conversations · voice: bulbul:v3 · ears: saaras:v3 · translate: sarvam-translate")
 
 autoplay_idx = st.session_state.pop("autoplay_idx", None)
 
 for i, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"], avatar="🧑" if m["role"] == "user" else "🤖"):
         st.markdown(m["content"])
-        if m["role"] == "assistant":
+        if m["role"] == "assistant" and not m["content"].startswith("⚠️"):
             if i in st.session_state.audio:
                 st.audio(st.session_state.audio[i], format="audio/wav", autoplay=(i == autoplay_idx))
             elif st.button("🔊 Listen", key=f"tts_{i}"):
                 with st.spinner("Generating voice..."):
                     try:
-                        st.session_state.audio[i] = speak(m["content"])
+                        st.session_state.audio[i] = speak(m["content"], m.get("lang"), pace)
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Voice failed: {type(e).__name__}: {e}")
+                        st.error(f"Voice failed: {friendly(e)}")
 
 prompt = st.chat_input("Type in any Indian language...")
 from_voice = False
@@ -136,7 +205,7 @@ if voice is not None:
                 heard = transcribe(data)
             except Exception as e:
                 heard = ""
-                st.error(f"Speech recognition failed: {type(e).__name__}: {e}")
+                st.error(f"Speech recognition failed: {friendly(e)}")
         if heard:
             prompt, from_voice = heard, True
         else:
@@ -149,18 +218,17 @@ if prompt:
     with st.chat_message("assistant", avatar="🤖"):
         with st.spinner("Thinking..."):
             try:
-                reply = get_client().chat.completions(
-                    model="sarvam-105b-conversations",
-                    messages=[SYSTEM] + st.session_state.messages,
-                ).choices[0].message.content
+                reply = get_reply(persona, target)
+                ok = True
             except Exception as e:
-                reply = f"⚠️ Something went wrong: {type(e).__name__}"
-    st.session_state.messages.append({"role": "assistant", "content": reply})
-    if from_voice and not reply.startswith("⚠️"):
+                reply = f"⚠️ {friendly(e)}"
+                ok = False
+    st.session_state.messages.append({"role": "assistant", "content": reply, "lang": target})
+    if from_voice and ok:
         try:
             idx = len(st.session_state.messages) - 1
-            st.session_state.audio[idx] = speak(reply)
+            st.session_state.audio[idx] = speak(reply, target, pace)
             st.session_state.autoplay_idx = idx
         except Exception as e:
-            st.error(f"Voice failed: {type(e).__name__}: {e}")
+            st.error(f"Voice failed: {friendly(e)}")
     st.rerun()
